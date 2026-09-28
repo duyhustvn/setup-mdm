@@ -37,8 +37,10 @@ MDM_*_Certificate.pem
 build/
 
 # NanoMDM binaries
-nanomdm-linux-amd64-*/nanomdm-linux-amd64
-nanomdm-linux-amd64-*/nano2nano-linux-amd64
+nanomdm-server/nanomdm-linux-amd64
+nanomdm-server/nano2nano-linux-amd64
+nanomdm-*/nanomdm-linux-amd64
+nanomdm-*/nano2nano-linux-amd64
 
 # SCEP binaries & cloned source repo
 scep/*-linux-amd64

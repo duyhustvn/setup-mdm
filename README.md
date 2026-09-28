@@ -107,7 +107,7 @@ Hệ thống này cho phép bạn **tự xây dựng một máy chủ MDM độc
 ├── ca.pem                              # Chứng chỉ CA công khai của SCEP
 ├── push.pem                            # File gộp chứng chỉ APNs từ Apple + Private Key (nạp vào NanoMDM)
 │
-├── nanomdm-linux-amd64-v0.9.0/         # Thư mục máy chủ NanoMDM
+├── nanomdm-server/         # Thư mục máy chủ NanoMDM
 │   ├── nanomdm-linux-amd64             # Binary thực thi của NanoMDM Server
 │   ├── enroll.mobileconfig             # Hồ sơ cấu hình đăng ký MDM cho thiết bị
 │   ├── cmdr.py                         # Công cụ sinh lệnh MDM (DeviceInformation, Lock, Restart...)
@@ -193,7 +193,7 @@ Do Apple APNs chỉ chấp nhận kết nối có chứng chỉ do Apple ký, b�
 
 1. **Khởi động NanoMDM Server (Cổng 9000):**
    ```bash
-   cd /home/vbox/projects/mdm/nanomdm-linux-amd64-v0.9.0
+   cd /home/vbox/projects/mdm/nanomdm-server
    ./nanomdm-linux-amd64 -ca ../ca.pem -api nanomdm -debug
    ```
 
@@ -213,7 +213,7 @@ Do Apple APNs chỉ chấp nhận kết nối có chứng chỉ do Apple ký, b�
 
 ### Bước 4: Cấu hình Hồ Sơ Đăng Ký (`enroll.mobileconfig`)
 
-Mở file `nanomdm-linux-amd64-v0.9.0/enroll.mobileconfig` và kiểm tra 3 thông số chính:
+Mở file `nanomdm-server/enroll.mobileconfig` và kiểm tra 3 thông số chính:
 
 1. **SCEP URL (dòng 19):** Trỏ về đường dẫn SCEP (qua Cloudflare Tunnel hoặc IP máy).
    ```xml
@@ -238,7 +238,7 @@ Mở file `nanomdm-linux-amd64-v0.9.0/enroll.mobileconfig` và kiểm tra 3 thô
 Do NanoMDM không kèm giao diện web phân phối file, ta dùng script Python `serve.py` trên cổng 8000:
 
 ```bash
-cd /home/vbox/projects/mdm/nanomdm-linux-amd64-v0.9.0
+cd /home/vbox/projects/mdm/nanomdm-server
 python3 serve.py
 ```
 
@@ -295,7 +295,7 @@ curl -s -T - -u nanomdm:nanomdm 'http://127.0.0.1:9000/v1/enqueue/<UDID>'
 #### 2. Xem kết quả thiết bị gửi về:
 Báo cáo của thiết bị được lưu tại:
 ```bash
-cat nanomdm-linux-amd64-v0.9.0/dbkv/queue/*/*/<UDID>.*.queueitem.report
+cat nanomdm-server/dbkv/queue/*/*/<UDID>.*.queueitem.report
 ```
 
 **Dữ liệu thực tế iPhone báo cáo:**
@@ -346,7 +346,7 @@ cat nanomdm-linux-amd64-v0.9.0/dbkv/queue/*/*/<UDID>.*.queueitem.report
 ### Q2: Chứng chỉ `device.crt` nằm ở đâu sau khi enroll?
 * **Trên Server SCEP:** Nằm tại `scep/depot/<Mã_Hash>.<Serial>.pem`.
   * Có thể copy ra xem: `sudo cp scep/depot/*.pem device.crt && openssl x509 -noout -text -in device.crt`
-* **Trên NanoMDM:** Được lưu dưới dạng mã hash tại `nanomdm-linux-amd64-v0.9.0/dbkv/cert_auth/`.
+* **Trên NanoMDM:** Được lưu dưới dạng mã hash tại `nanomdm-server/dbkv/cert_auth/`.
 * **Trên Thiết bị:** Nằm trong phần cứng bảo mật (Keychain / Secure Enclave) của iPhone/Mac.
 
 ### Q3: Chạy `cmdr.py` bị lỗi `invalid choice`?
