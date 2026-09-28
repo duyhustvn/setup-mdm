@@ -1,6 +1,6 @@
 # Hướng Dẫn Quản Lý Chứng Chỉ MDM & Cấu Hình Push Topic (NanoMDM + SCEP)
 
-Tài liệu này tổng hợp toàn bộ kiến thức, kiến trúc, vai trò của từng file/thành phần, và quy trình chi tiết từng bước về việc cấp phát chứng chỉ thiết bị (`device.crt`), tạo **Apple MDM Push Certificate (Push Topic)**, và nạp vào **NanoMDM** & **SCEP Server**.
+Tài liệu này tổng hợp toàn bộ kiến thức, kiến trúc, vai trò của từng file/thành phần, và quy trình chi tiết từng bước về việc cấp phát chứng chỉ thiết bị (`device.crt`), tạo **Apple MDM Push Certificate (Push Topic)**, thiết lập Web Portal phục vụ tải hồ sơ, giải quyết lỗi sổ cái `index.txt`, và hoàn tất luồng **Enrollment** vào **NanoMDM**.
 
 ---
 
@@ -208,17 +208,113 @@ Apple quy định mọi thành phần cấu hình đều phải có các thuộc
 
 ---
 
-### "Tôi có cần tự điền các mã UUID và Identifier không?"
+## 7. Cấu Hình Web Portal Phục Vụ Tải Hồ Sơ (`serve.py`)
 
-* **Không cần:** File `enroll.mobileconfig` đi kèm trong dự án NanoMDM là **template chuẩn được tác giả dựng sẵn**. Các mã `PayloadUUID` và `PayloadIdentifier` đã được sinh ngẫu nhiên và liên kết chuẩn xác với nhau.
-* **Bạn chỉ cần thay đổi 3 giá trị của hệ thống bạn:**
-  1. `URL` (trong block SCEP): Đường link tunnel trỏ về cổng SCEP.
-  2. `ServerURL` (trong block MDM): Đường link tunnel trỏ về cổng NanoMDM (`/mdm`).
-  3. `Topic` (trong block MDM): Điền Push Topic lấy từ `push.pem`.
+Do cả `scepserver` (chỉ là CA ký cert) lẫn `nanomdm` (chỉ là MDM engine) đều không có sẵn cổng phân phối file tĩnh, ta triển khai một Web Server mini bằng Python:
+
+### Script `serve.py`
+Script nằm tại `nanomdm-linux-amd64-v0.9.0/serve.py`, lắng nghe cổng `8000`:
+* Cung cấp giao diện web thân thiện với nút bấm **"Cài Đặt Hồ Sơ MDM"**.
+* **Đặc biệt quan trọng về MIME Type:** Đăng ký header HTTP:
+  ```http
+  Content-Type: application/x-apple-aspen-config
+  ```
+  Nhờ header này, trình duyệt Safari trên thiết bị Apple sẽ không tải file về dạng văn bản thô mà tự động kích hoạt trình cài đặt hồ sơ hệ thống (*"Trang web này đang cố gắng tải về một hồ sơ cấu hình..."*).
+
+### Chạy Server & Tạo Public Tunnel:
+```bash
+# 1. Chạy Web Server Enrollment (Port 8000)
+cd nanomdm-linux-amd64-v0.9.0
+python3 serve.py
+
+# 2. Tạo đường link Internet bằng Cloudflare Tunnel
+cloudflared tunnel --url http://localhost:8000
+```
+Người dùng chỉ cần mở **Safari** trên iPhone/Mac và truy cập đường link Cloudflare vừa sinh ra để bắt đầu enroll.
 
 ---
 
-## 7. Các Lưu Ý Sống Còn (Important Notes)
+## 8. Cơ Chế Sổ Cái CA `index.txt` & Xử Lý Lỗi `DN already exists`
+
+### 1. File `index.txt` là gì? Nằm ở đâu?
+* **Vị trí:** `scep/depot/index.txt` (được mount vào container SCEP tại `/depot/index.txt`).
+* **Bản chất:** Đây là file cơ sở dữ liệu dạng bảng phẳng (flat-file) theo chuẩn của **OpenSSL CA**. Mỗi khi SCEP Server cấp một chứng chỉ mới, nó sẽ lưu 1 dòng vào file này:
+  ```text
+  V    270928155942Z    06    f4d430...6.pem    /CN=...
+  ```
+  * `V`: Trạng thái Valid (hợp lệ).
+  * `270928...`: Ngày giờ hết hạn.
+  * `06`: Số Serial cấp cho chứng chỉ.
+  * Cột cuối: Tên định danh (Distinguished Name - DN).
+
+### 2. Nguyên nhân lỗi `failed to sign CSR: err="DN already exists"`:
+* Khi thiết bị gửi CSR lên SCEP mà không chỉ định trước trường `Subject` trong profile, thiết bị sẽ gửi DN rỗng (`dn = ""`).
+* Mã nguồn `micromdm/scep` sử dụng hàm `strings.HasSuffix(line, "")` để kiểm tra tên DN trong file `index.txt`. Do mọi chuỗi đều có đuôi là `""`, SCEP nhận diện nhầm là bị trùng tên với một chứng chỉ đã cấp trước đó đang còn hạn (theo cơ chế kiểm tra gia hạn `-allowrenew 14`).
+
+### 3. Cách xử lý triệt để:
+1. **Dọn sạch sổ cái khi bị kẹt:**
+   ```bash
+   sudo truncate -s 0 scep/depot/index.txt
+   ```
+2. **Cấu hình SCEP Server luôn cho phép cấp phát mới:**
+   Khi khởi động container SCEP, luôn truyền thêm tham số **`-allowrenew 0`**:
+   ```bash
+   docker run -it --rm -v ./depot:/depot -p 8080:8080 micromdm/scep:latest -allowrenew 0
+   ```
+   *(Cờ `-allowrenew 0` tắt hoàn toàn kiểm tra trùng lặp thời hạn, đảm bảo enroll hàng loạt thiết bị ổn định 100%).*
+
+---
+
+## 9. Quy Trình Enroll Thiết Bị Thực Tế & Nhật Ký Giao Tiếp (Logs)
+
+### Các bước trên thiết bị Apple:
+1. Mở **Safari** truy cập link portal (ví dụ: `https://...trycloudflare.com`).
+2. Nhấn nút **"Cài Đặt Hồ Sơ MDM"** -> Chọn **Cho phép (Allow)**.
+3. Vào **Settings (Cài đặt)** > **Profile Downloaded (Đã tải về hồ sơ)** > Bấm **Install (Cài đặt)** > Nhập mật khẩu máy và đồng ý tin cậy chứng chỉ CA.
+
+### Luồng tương tác ngầm giữa Thiết bị và Hệ thống Server:
+
+```text
+[Thiết bị Apple]                       [SCEP Server]                  [NanoMDM Server]
+       |                                     |                                |
+       |--- 1. GET /scep?op=GetCACert ------>|                                |
+       |<-- 2. Trả về ca.pem ----------------|                                |
+       |                                     |                                |
+       |--- 3. POST /scep?op=PKIOperation -->|                                |
+       |<-- 4. Ký và trả về device.crt ------|                                |
+       |                                                                      |
+       |--- 5. PUT /mdm (Authenticate: Serial, Model, UDID) ----------------->|
+       |<-- 6. 200 OK (Xác thực cert thành công) ----------------------------|
+       |                                                                      |
+       |--- (Thiết bị xin Push Token từ Apple APNs bằng Topic)                |
+       |                                                                      |
+       |--- 7. PUT /mdm (TokenUpdate: APNs Token, PushMagic) ---------------->|
+       |<-- 8. 200 OK (Ghi nhận Push Token) ----------------------------------|
+```
+
+### Log thực tế chứng minh hoàn tất thành công:
+
+1. **Phía SCEP Server (`PKIOperation` thành công):**
+   ```text
+   ts=2026-09-28T15:59:42Z caller=scep.go:366 msg="decrypt pkiEnvelope" has_challenge=true
+   level=info ts=2026-09-28T15:59:42Z caller=service_logging.go:47 component=scep_service method=PKIOperation err=null took=54.192ms
+   level=info ts=2026-09-28T15:59:42Z caller=logutil.go:70 component=http method=POST status=200 path="/scep?operation=PKIOperation"
+   ```
+
+2. **Phía NanoMDM Server (Lưu trữ thành công vào Database `dbkv/`):**
+   Hệ thống tự động khởi tạo thư mục lưu trữ thiết bị theo mã UDID phần cứng:
+   ```text
+   nanomdm-linux-amd64-v0.9.0/dbkv/enrollments/<UDID>/
+   ├── .token          # APNs Push Token từ Apple
+   ├── .push_magic     # Khóa PushMagic kích hoạt
+   ├── .topic          # com.apple.mgmt.External.6a0a852b-...
+   ├── .enrolled_at    # Thời điểm đăng ký
+   └── .last_seen_at   # Thời điểm tương tác gần nhất
+   ```
+
+---
+
+## 10. Các Lưu Ý Sống Còn (Important Notes)
 
 1. **Bản chất của Cloudflare Quick Tunnel (`trycloudflare.com`):**
    - Quick Tunnel là kết nối tạm thời. Nếu bạn dừng hoặc khởi động lại tiến trình `cloudflared`, Cloudflare sẽ sinh ra một URL subdomain ngẫu nhiên mới.
