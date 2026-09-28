@@ -1,6 +1,6 @@
 # Hướng Dẫn Quản Lý Chứng Chỉ MDM & Cấu Hình Push Topic (NanoMDM + SCEP)
 
-Tài liệu này tổng hợp toàn bộ kiến thức, kiến trúc, vai trò của từng file/thành phần, và quy trình chi tiết từng bước về việc cấp phát chứng chỉ thiết bị (`device.crt`), tạo **Apple MDM Push Certificate (Push Topic)**, thiết lập Web Portal phục vụ tải hồ sơ, giải quyết lỗi sổ cái `index.txt`, và hoàn tất luồng **Enrollment** vào **NanoMDM**.
+Tài liệu này tổng hợp toàn bộ kiến thức, kiến trúc, vai trò của từng file/thành phần, và quy trình chi tiết từng bước về việc cấp phát chứng chỉ thiết bị (`device.crt`), tạo **Apple MDM Push Certificate (Push Topic)**, thiết lập Web Portal phục vụ tải hồ sơ, giải quyết lỗi sổ cái `index.txt`, hoàn tất luồng **Enrollment** vào **NanoMDM**, và **gửi lệnh giám sát/điều khiển thiết bị**.
 
 ---
 
@@ -240,7 +240,7 @@ Người dùng chỉ cần mở **Safari** trên iPhone/Mac và truy cập đư�
 * **Vị trí:** `scep/depot/index.txt` (được mount vào container SCEP tại `/depot/index.txt`).
 * **Bản chất:** Đây là file cơ sở dữ liệu dạng bảng phẳng (flat-file) theo chuẩn của **OpenSSL CA**. Mỗi khi SCEP Server cấp một chứng chỉ mới, nó sẽ lưu 1 dòng vào file này:
   ```text
-  V    270928155942Z    06    f4d430...6.pem    /CN=...
+  V    270928155942Z    06    f4d430bc...6.pem    /CN=...
   ```
   * `V`: Trạng thái Valid (hợp lệ).
   * `270928...`: Ngày giờ hết hạn.
@@ -294,27 +294,152 @@ Người dùng chỉ cần mở **Safari** trên iPhone/Mac và truy cập đư�
 
 ### Log thực tế chứng minh hoàn tất thành công:
 
-1. **Phía SCEP Server (`PKIOperation` thành công):**
-   ```text
-   ts=2026-09-28T15:59:42Z caller=scep.go:366 msg="decrypt pkiEnvelope" has_challenge=true
-   level=info ts=2026-09-28T15:59:42Z caller=service_logging.go:47 component=scep_service method=PKIOperation err=null took=54.192ms
-   level=info ts=2026-09-28T15:59:42Z caller=logutil.go:70 component=http method=POST status=200 path="/scep?operation=PKIOperation"
-   ```
+#### 1. Phía SCEP Server (`PKIOperation` thành công):
+```text
+level=info ts=2026-09-28T15:59:41Z caller=logutil.go:70 component=http method=GET status=200 path="/scep?operation=GetCACert"
+level=info ts=2026-09-28T15:59:41Z caller=logutil.go:70 component=http method=GET status=200 path="/scep?operation=GetCACaps"
+ts=2026-09-28T15:59:42Z caller=scep.go:271 msg="parsed scep pkiMessage" scep_message_type="PKCSReq (19)"
+ts=2026-09-28T15:59:42Z caller=scep.go:366 msg="decrypt pkiEnvelope" has_challenge=true
+level=info ts=2026-09-28T15:59:42Z caller=service_logging.go:47 component=scep_service method=PKIOperation err=null took=54.192ms
+level=info ts=2026-09-28T15:59:42Z caller=logutil.go:70 component=http method=POST status=200 path="/scep?operation=PKIOperation"
+```
 
-2. **Phía NanoMDM Server (Lưu trữ thành công vào Database `dbkv/`):**
-   Hệ thống tự động khởi tạo thư mục lưu trữ thiết bị theo mã UDID phần cứng:
-   ```text
-   nanomdm-linux-amd64-v0.9.0/dbkv/enrollments/<UDID>/
-   ├── .token          # APNs Push Token từ Apple
-   ├── .push_magic     # Khóa PushMagic kích hoạt
-   ├── .topic          # com.apple.mgmt.External.6a0a852b-...
-   ├── .enrolled_at    # Thời điểm đăng ký
-   └── .last_seen_at   # Thời điểm tương tác gần nhất
-   ```
+#### 2. Phía NanoMDM Server (Tiếp nhận danh tính và Push Token):
+```text
+ts=2026-09-28T22:59:43+07:00 level=info handler=log method=PUT path=/mdm agent=MDM/1.0
+ts=2026-09-28T22:59:43+07:00 level=info service=certauth msg=cert associated enrollment=new id=00008140-000265A63652801C hash=f4d430bc105e545520b26f774679f8973a99f6e9dc983a9d59a4a543b46caade
+ts=2026-09-28T22:59:43+07:00 level=info service=nanomdm id=00008140-000265A63652801C type=Device msg=Authenticate serial_number=HG3Q25R61Y
+ts=2026-09-28T22:59:43+07:00 level=info handler=log method=PUT path=/mdm agent=MDM/1.0
+ts=2026-09-28T22:59:43+07:00 level=info service=nanomdm id=00008140-000265A63652801C type=Device msg=TokenUpdate
+```
+
+*Ý nghĩa các sự kiện:*
+* `cert associated`: Bóc tách `device.crt` từ header client, xác thực chữ ký CA thành công và lưu liên kết cert hash `f4d430bc...` với máy.
+* `Authenticate`: Thiết bị chính thức đăng ký danh tính (UDID: `00008140-000265A63652801C`, Serial Number: `HG3Q25R61Y`).
+* `TokenUpdate`: Thiết bị xin thành công **APNs Push Token** từ Apple và nộp về cho NanoMDM lưu lại.
+
+#### 3. Dữ liệu lưu trữ trong Database NanoMDM (`dbkv/`):
+```text
+nanomdm-linux-amd64-v0.9.0/dbkv/
+├── cert_auth/f4/d4/f4d430bc...hash_cert       # Liên kết cert hash -> UDID
+└── enrollments/00/00/00008140-000265A63652801C/
+    ├── .token                                 # Push Token do Apple APNs cấp
+    ├── .push_magic                            # Khóa PushMagic
+    ├── .topic                                 # com.apple.mgmt.External.6a0a852b-...
+    ├── .enrolled_at                           # Thời gian đăng ký
+    └── .last_seen_at                          # Lần tương tác gần nhất
+```
 
 ---
 
-## 10. Các Lưu Ý Sống Còn (Important Notes)
+## 10. Hướng Dẫn Ra Lệnh & Giám Sát Thiết Bị (Device Management & Monitoring)
+
+Sau khi thiết bị đã enroll thành công, máy chủ có thể gửi lệnh điều khiển và giám sát từ xa thông qua mạng **Apple APNs**.
+
+### 1. Cơ chế gửi lệnh của NanoMDM
+NanoMDM tách biệt 2 công việc:
+1. **Tạo lệnh (Generator):** Sử dụng script `cmdr.py` để sinh ra nội dung gói tin XML Plist chuẩn của Apple ra `stdout`.
+2. **Nạp lệnh vào hàng đợi (Enqueue API):** Dùng lệnh `curl` gửi nội dung XML này qua phương thức `PUT` vào endpoint `/v1/enqueue/<UDID>` của NanoMDM.
+
+### 2. Lệnh truy vấn thông tin thiết bị (`DeviceInformation`)
+
+Chạy lệnh sau để yêu cầu thiết bị gửi về các thông số phần cứng, hệ điều hành và trạng thái pin:
+```bash
+python3 cmdr.py DevInfo OSVersion Model DeviceName BatteryLevel WiFiMAC BluetoothMAC SerialNumber | \
+curl -s -T - -u nanomdm:nanomdm 'http://127.0.0.1:9000/v1/enqueue/<UDID>'
+```
+*(Thay `<UDID>` bằng mã máy của bạn, ví dụ: `00008140-000265A63652801C`).*
+
+**Kết quả phản hồi khi nạp lệnh thành công:**
+```json
+{
+    "status": {
+        "00008140-000265A63652801C": {
+            "push_result": "2F972609-B533-67B5-0ADF-0AB1D0AC1E02"
+        }
+    },
+    "command_uuid": "56f4ffab-2a33-4884-bb53-0b4559defb0f",
+    "request_type": "DeviceInformation"
+}
+```
+* `push_result`: Mã xác nhận `apns-id` do chính Apple APNs Gateway trả về, chứng minh tín hiệu đánh thức máy đã được Apple tiếp nhận và bắn thẳng tới điện thoại.
+
+---
+
+### 3. Xem báo cáo phản hồi từ thiết bị
+
+Sau vài giây, thiết bị Apple sẽ tự động thức dậy, thực thi lệnh và gửi kết quả về máy chủ. Kết quả được lưu tại thư mục:
+```text
+nanomdm-linux-amd64-v0.9.0/dbkv/queue/00/00/<UDID>.<COMMAND_UUID>.queueitem.report
+```
+
+Xem kết quả phản hồi của thiết bị:
+```bash
+cat nanomdm-linux-amd64-v0.9.0/dbkv/queue/*/*/<UDID>.*.queueitem.report
+```
+
+**Dữ liệu thực tế iPhone báo cáo về:**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CommandUUID</key>
+	<string>56f4ffab-2a33-4884-bb53-0b4559defb0f</string>
+	<key>Status</key>
+	<string>Acknowledged</string>
+	<key>UDID</key>
+	<string>00008140-000265A63652801C</string>
+	<key>QueryResponses</key>
+	<dict>
+		<key>DeviceName</key>
+		<string>iPhone của VCS</string>
+		<key>Model</key>
+		<string>MYNE3VN</string>
+		<key>OSVersion</key>
+		<string>26.6.1</string>
+		<key>BatteryLevel</key>
+		<real>0.34999999999999998</real>
+	</dict>
+</dict>
+</plist>
+```
+
+* **`Status = Acknowledged`**: Thiết bị xác nhận đã thực thi lệnh thành công.
+* **`DeviceName`**: Tên hiển thị của máy (`iPhone của VCS`).
+* **`Model`**: Mã dòng máy (`MYNE3VN`).
+* **`OSVersion`**: Phiên bản iOS đang chạy (`26.6.1`).
+* **`BatteryLevel`**: Mức pin hiện tại (`0.35` ~ `35%`).
+
+---
+
+### 4. Danh sách các trường có thể giám sát (`Queries`):
+
+Bạn có thể truyền thêm bất kỳ trường nào dưới đây vào lệnh `DevInfo`:
+* `DeviceName`: Tên thiết bị
+* `Model`: Model máy
+* `OSVersion`: Phiên bản hệ điều hành
+* `BatteryLevel`: Mức pin
+* `SerialNumber`: Số Serial
+* `WiFiMAC`, `BluetoothMAC`: Địa chỉ MAC mạng
+* `IsDeviceLocatorActive`: Trạng thái bật/tắt Tìm iPhone (Find My)
+* `IsSupervised`: Máy có đang bật chế độ Giám sát (Supervised) không
+* `AvailableDeviceCapacity`: Dung lượng bộ nhớ còn trống
+
+---
+
+### 5. Một số lệnh quản trị hữu ích khác:
+
+| Lệnh | Cú pháp thực thi | Chức năng |
+| :--- | :--- | :--- |
+| **Kiểm tra bảo mật** | `python3 cmdr.py SecurityInfo \| curl -s -T - -u nanomdm:nanomdm 'http://127.0.0.1:9000/v1/enqueue/<UDID>'` | Kiểm tra passcode, trạng thái mã hóa, FaceID/TouchID. |
+| **Danh sách chứng chỉ** | `python3 cmdr.py CertificateList \| curl -s -T - -u nanomdm:nanomdm 'http://127.0.0.1:9000/v1/enqueue/<UDID>'` | Liệt kê tất cả chứng chỉ số đang cài trên máy. |
+| **Khóa máy từ xa** | `python3 cmdr.py DeviceLock --pin 123456 \| curl -s -T - -u nanomdm:nanomdm 'http://127.0.0.1:9000/v1/enqueue/<UDID>'` | Khóa màn hình thiết bị ngay lập tức bằng mã PIN. |
+| **Khởi động lại máy** | `python3 cmdr.py RestartDevice \| curl -s -T - -u nanomdm:nanomdm 'http://127.0.0.1:9000/v1/enqueue/<UDID>'` | Yêu cầu máy khởi động lại từ xa. |
+
+---
+
+## 11. Các Lưu Ý Sống Còn (Important Notes)
 
 1. **Bản chất của Cloudflare Quick Tunnel (`trycloudflare.com`):**
    - Quick Tunnel là kết nối tạm thời. Nếu bạn dừng hoặc khởi động lại tiến trình `cloudflared`, Cloudflare sẽ sinh ra một URL subdomain ngẫu nhiên mới.
