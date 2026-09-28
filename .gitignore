@@ -1,0 +1,56 @@
+# ==============================================================================
+# BẢO MẬT: Private Keys & Chứng chỉ chứa khóa riêng (TUYỆT ĐỐI KHÔNG COMMIT)
+# ==============================================================================
+*.key
+push.pem
+*.p12
+*.pfx
+
+# SCEP CA Private Key & Storage
+scep/depot/ca.key
+scep/depot/serial*
+scep/depot/*.txt
+scep/depot/scepclient*
+
+# ==============================================================================
+# Runtime Storage & Database (Bộ nhớ dữ liệu khi server chạy)
+# ==============================================================================
+**/dbkv/
+scep/depot/
+
+# ==============================================================================
+# File trung gian trong quá trình tạo Push Cert (mdmcert.download)
+# ==============================================================================
+*.csr
+*.req
+*.p7
+*.b64*
+mdm_signed_request*
+mdmcert.download.*
+MDM_*_Certificate.pem
+
+# ==============================================================================
+# Binaries & Archives (File thực thi và file nén tải về)
+# ==============================================================================
+*.zip
+*.tar.gz
+build/
+
+# NanoMDM binaries
+nanomdm-linux-amd64-*/nanomdm-linux-amd64
+nanomdm-linux-amd64-*/nano2nano-linux-amd64
+
+# SCEP binaries & cloned source repo
+scep/*-linux-amd64
+scep/
+
+# ==============================================================================
+# Logs, Python Cache & Editor files
+# ==============================================================================
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+Thumbs.db
+*.swp
+*~
