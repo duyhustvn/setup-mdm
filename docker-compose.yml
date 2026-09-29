@@ -23,10 +23,10 @@ services:
   # 1. SCEP Server: Máy chủ cấp phát chứng chỉ định danh thiết bị (CA)
   # ============================================================================
   scep:
-    build:
-      context: ./scep
-      dockerfile: Dockerfile
-    image: scep:local
+    # build:
+    #   context: ./scep
+    #   dockerfile: Dockerfile
+    image: duyle95/scep:v2.3.0
     container_name: scep-server
     restart: unless-stopped
     volumes:
@@ -38,10 +38,10 @@ services:
   # 2. NanoMDM Server: Máy chủ điều khiển & nhận lệnh MDM từ Apple
   # ============================================================================
   nanomdm:
-    build:
-      context: ./nanomdm-server
-      dockerfile: Dockerfile
-    image: nanomdm:local
+    # build:
+    #   context: ./nanomdm-server
+    #   dockerfile: Dockerfile
+    image: duyle95/nanomdm:v0.9.0
     container_name: nanomdm-server
     restart: unless-stopped
     ports:
