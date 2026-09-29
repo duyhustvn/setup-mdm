@@ -15,7 +15,8 @@
    - [Bước 4: Cấu hình Tunnel ra ngoài Internet](#bước-4-cấu-hình-tunnel-ra-ngoài-internet)
    - [Bước 5: Kiểm tra kết nối qua Gateway](#bước-5-kiểm-tra-kết-nối-qua-gateway)
 5. [Tùy Chọn Nâng Cao: Đóng Gói Toàn Diện với Docker Compose](#5-tùy-chọn-nâng-cao-đóng-gói-toàn-diện-với-docker-compose)
-6. [Các Lưu Ý Sống Còn Với Giao Thức Apple MDM](#6-các-lưu-ý-sống-còn-với-giao-thức-apple-mdm)
+6. [Cơ Chế Xác Thực Thiết Bị: mTLS vs. SignMessage](#6-cơ-chế-xác-thực-thiết-bị-mtls-vs-signmessage)
+7. [Các Lưu Ý Sống Còn Với Giao Thức Apple MDM](#7-các-lưu-ý-sống-còn-với-giao-thức-apple-mdm)
 
 ---
 
@@ -314,7 +315,84 @@ services:
 
 ---
 
-## 6. Các Lưu Ý Sống Còn Với Giao Thức Apple MDM
+## 6. Cơ Chế Xác Thực Thiết Bị: mTLS vs. SignMessage
+
+Trong giao thức Apple MDM, việc xác thực thiết bị và chống giả mạo được Apple hỗ trợ thông qua **hai cơ chế**:
+
+### 6.1. Phân biệt 2 cơ chế
+
+| Đặc điểm | Cơ chế 1: mTLS Tầng Mạng (Network-level mTLS) | Cơ chế 2: Ký số Ứng dụng (`SignMessage: true`) *(Dự án đang dùng)* |
+| :--- | :--- | :--- |
+| **Tầng hoạt động** | Tầng 4 / TLS Handshake | Tầng 7 / HTTP Header (`Mdm-Signature`) |
+| **Cách gửi cert** | Thiết bị gửi `device.crt` trong bước TLS `Certificate` | Thiết bị đính kèm `device.crt` vào chữ ký PKCS#7 trong header |
+| **Cách chứng minh sở hữu** | Ký gói tin `CertificateVerify` lúc bắt tay TLS | Ký toàn bộ HTTP Body (XML Plist) bằng Private Key |
+| **Qua Reverse Proxy / Tunnel** | **Rất khó khăn:** Proxy kết thúc TLS (TLS Termination) sẽ làm đứt chuỗi mTLS nếu không có L4 TCP passthrough. | **Hoàn hảo:** Proxy L7 / Envoy / Cloudflare chuyển tiếp HTTP bình thường, header không bị ảnh hưởng. |
+| **Cấu hình Profile** | Mặc định (hoặc `SignMessage` để `false`) | Bắt buộc bật `<key>SignMessage</key><true/>` trong payload MDM |
+
+---
+
+### 6.2. Luồng hoạt động chi tiết của `SignMessage` (End-to-End)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Device as Thiết bị Apple (iPhone/Mac)
+    participant SCEP as SCEP Server (:8080)
+    participant Gateway as Envoy API Gateway (:10000)
+    participant MDM as NanoMDM Server (:9000)
+
+    Note over Device,SCEP: Giai đoạn 1: Xin cấp chứng chỉ định danh
+    Device->>Device: Sinh cặp khóa RSA 2048 trong Secure Enclave
+    Device->>SCEP: Gửi CSR xin cấp cert
+    SCEP-->>Device: Trả về chứng chỉ định danh (device.crt)
+
+    Note over Device,MDM: Giai đoạn 2: Giao tiếp MDM (Authenticate, TokenUpdate, Ack)
+    Device->>Device: Tạo HTTP Body (XML Plist)
+    Device->>Device: Dùng Private Key trong Secure Enclave tạo chữ ký số PKCS#7 trên Body
+    Device->>Gateway: Gửi POST /mdm kèm header:<br/>Mdm-Signature: Base64(PKCS#7_Signature_kèm_device.crt)
+    Gateway->>MDM: Chuyển tiếp Request (Giữ nguyên header Mdm-Signature)
+
+    Note over MDM: Giai đoạn 3: Xác thực tại Backend NanoMDM
+    MDM->>MDM: 1. Đọc header Mdm-Signature, bóc tách cert của thiết bị
+    MDM->>MDM: 2. Dùng ca.pem xác minh cert có do SCEP CA ký không
+    MDM->>MDM: 3. Dùng Public Key trong cert xác minh chữ ký trên HTTP Body
+    MDM->>MDM: 4. Tính Cert Hash để map với UDID trong cơ sở dữ liệu
+    MDM-->>Gateway: Trả về HTTP 200 OK (Kèm lệnh tiếp theo trong hàng đợi)
+    Gateway-->>Device: Chuyển tiếp lệnh về thiết bị
+```
+
+---
+
+### 6.3. Hai kịch bản triển khai với Envoy API Gateway
+
+#### Kịch bản A: Envoy làm L7 Reverse Proxy trong suốt (Khuyên Dùng)
+* **Nguyên lý:** Envoy chỉ đóng vai trò reverse proxy thông thường, terminate TLS công khai (từ Cloudflare Tunnel hoặc Let's Encrypt), sau đó chuyển tiếp HTTP nguyên vẹn vào NanoMDM.
+* **Xác thực:** NanoMDM tự giải mã header `Mdm-Signature` và đối chiếu với CA qua tham số `./nanomdm-linux-amd64 -ca ../ca.pem`.
+* **Cấu hình:** Sử dụng file `envoy/envoy.yaml` chuẩn (như trong hướng dẫn Bước 1).
+* **Ưu điểm:** Cực kỳ linh hoạt, tương thích 100% với Cloudflare Quick Tunnel, ngrok hoặc bất kỳ Ingress Controller nào.
+
+#### Kịch bản B: Envoy đóng vai trò mTLS Termination trực tiếp tại Cổng vào (Nâng Cao)
+* **Nguyên lý:** Thiết bị kết nối trực tiếp vào Envoy (cổng 443 hoặc port riêng). Envoy yêu cầu và xác thực `device.crt` của thiết bị ngay tại bước bắt tay TLS L4.
+* **Cấu hình mẫu trên Envoy:**
+  ```yaml
+  transport_socket:
+    name: envoy.transport_sockets.tls
+    typed_config:
+      "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+      common_tls_context:
+        tls_certificates:
+        - certificate_chain: { filename: "/etc/envoy/server.crt" }
+          private_key: { filename: "/etc/envoy/server.key" }
+        validation_context:
+          trusted_ca:
+            filename: "/etc/envoy/ca.pem"  # SCEP Root CA để xác thực thiết bị
+      require_client_certificate: true
+  ```
+* **Lưu ý:** Kịch bản này **không thể** đi qua Cloudflare Quick Tunnel (vì Cloudflare chấm dứt TLS trước khi tới Envoy), mà đòi hỏi bạn phải có IP Public tĩnh và mở cổng trực tiếp cho Envoy.
+
+---
+
+## 7. Các Lưu Ý Sống Còn Với Giao Thức Apple MDM
 
 1. **Header `Mdm-Signature`:**
    * Trong `enroll.mobileconfig`, tham số `<key>SignMessage</key><true/>` yêu cầu thiết bị Apple ký số vào toàn bộ HTTP body và đính kèm vào header `Mdm-Signature`.
