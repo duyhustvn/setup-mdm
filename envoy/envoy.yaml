@@ -1,0 +1,105 @@
+# Envoy API Gateway Configuration for Apple MDM Stack
+# Routes:
+#   - /scep*               -> SCEP CA Server (127.0.0.1:8080)
+#   - /mdm*                -> NanoMDM Server (127.0.0.1:9000)
+#   - /v1/*                -> NanoMDM Admin API (127.0.0.1:9000)
+#   - / & static files     -> Web Portal serve.py (127.0.0.1:8000)
+
+static_resources:
+  listeners:
+  - name: listener_http
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 10000
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          codec_type: AUTO
+          route_config:
+            name: mdm_routes
+            virtual_hosts:
+            - name: mdm_virtual_host
+              domains: ["*"]
+              routes:
+              # 1. NanoMDM Admin API (/v1/)
+              - match:
+                  prefix: "/v1/"
+                route:
+                  cluster: nanomdm_cluster
+                  timeout: 30s
+
+              # 2. SCEP CA Endpoint (/scep)
+              - match:
+                  prefix: "/scep"
+                route:
+                  cluster: scep_cluster
+                  timeout: 30s
+
+              # 3. Apple MDM Protocol Endpoint (/mdm)
+              - match:
+                  prefix: "/mdm"
+                route:
+                  cluster: nanomdm_cluster
+                  timeout: 60s
+
+              # 4. Web Portal & Profile distribution (root fallback)
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: portal_cluster
+                  timeout: 15s
+
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  # Cluster 1: Web Portal (serve.py)
+  - name: portal_cluster
+    connect_timeout: 0.5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: portal_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8000
+
+  # Cluster 2: SCEP CA Server
+  - name: scep_cluster
+    connect_timeout: 0.5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: scep_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 8080
+
+  # Cluster 3: NanoMDM Core Server
+  - name: nanomdm_cluster
+    connect_timeout: 0.5s
+    type: STRICT_DNS
+    lb_policy: ROUND_ROBIN
+    load_assignment:
+      cluster_name: nanomdm_cluster
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: 127.0.0.1
+                port_value: 9000
