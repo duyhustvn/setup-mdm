@@ -16,6 +16,10 @@
    - [Bước 5: Kiểm tra kết nối qua Gateway](#bước-5-kiểm-tra-kết-nối-qua-gateway)
 5. [Tùy Chọn Nâng Cao: Đóng Gói Toàn Diện với Docker Compose](#5-tùy-chọn-nâng-cao-đóng-gói-toàn-diện-với-docker-compose)
 6. [Cơ Chế Xác Thực Thiết Bị: mTLS vs. SignMessage](#6-cơ-chế-xác-thực-thiết-bị-mtls-vs-signmessage)
+   - [6.1. Phân biệt 2 cơ chế](#61-phân-biệt-2-cơ-chế)
+   - [6.2. Luồng hoạt động chi tiết của SignMessage](#62-luồng-hoạt-động-chi-tiết-của-signmessage-end-to-end)
+   - [6.3. Hai kịch bản triển khai với Envoy Gateway](#63-hai-kịch-bản-triển-khai-với-envoy-api-gateway)
+   - [6.4. Triển khai Thực Tế: Phía trước có Cloudflare WAF](#64-triển-khai-thực-tế-phía-trước-có-cloudflare-waf)
 7. [Các Lưu Ý Sống Còn Với Giao Thức Apple MDM](#7-các-lưu-ý-sống-còn-với-giao-thức-apple-mdm)
 
 ---
@@ -337,14 +341,16 @@ Trong giao thức Apple MDM, việc xác thực thiết bị và chống giả m
 sequenceDiagram
     autonumber
     actor Device as Thiết bị Apple (iPhone/Mac)
-    participant SCEP as SCEP Server (:8080)
     participant Gateway as Envoy API Gateway (:10000)
+    participant SCEP as SCEP Server (:8080)
     participant MDM as NanoMDM Server (:9000)
 
-    Note over Device,SCEP: Giai đoạn 1: Xin cấp chứng chỉ định danh
+    Note over Device,SCEP: Giai đoạn 1: Xin cấp chứng chỉ định danh qua Gateway
     Device->>Device: Sinh cặp khóa RSA 2048 trong Secure Enclave
-    Device->>SCEP: Gửi CSR xin cấp cert
-    SCEP-->>Device: Trả về chứng chỉ định danh (device.crt)
+    Device->>Gateway: Gửi CSR xin cấp cert (POST /scep)
+    Gateway->>SCEP: Chuyển tiếp request đến SCEP Server
+    SCEP-->>Gateway: Ký và trả về chứng chỉ định danh (device.crt)
+    Gateway-->>Device: Chuyển tiếp device.crt về cho thiết bị
 
     Note over Device,MDM: Giai đoạn 2: Giao tiếp MDM (Authenticate, TokenUpdate, Ack)
     Device->>Device: Tạo HTTP Body (XML Plist)
@@ -372,7 +378,7 @@ sequenceDiagram
 * **Ưu điểm:** Cực kỳ linh hoạt, tương thích 100% với Cloudflare Quick Tunnel, ngrok hoặc bất kỳ Ingress Controller nào.
 
 #### Kịch bản B: Envoy đóng vai trò mTLS Termination trực tiếp tại Cổng vào (Nâng Cao)
-* **Nguyên lý:** Thiết bị kết nối trực tiếp vào Envoy (cổng 443 hoặc port riêng). Envoy yêu cầu và xác thực `device.crt` của thiết bị ngay tại bước bắt tay TLS L4.
+* **Nguyên lý:** Thiết bị kết nối trực tiếp vào Envoy (cổng 443). Envoy vừa là nơi xác thực domain (Server TLS), vừa yêu cầu thiết bị nộp chứng chỉ `device.crt` (Client mTLS) trong cùng 1 phiên bắt tay TLS duy nhất.
 * **Cấu hình mẫu trên Envoy:**
   ```yaml
   transport_socket:
@@ -381,14 +387,88 @@ sequenceDiagram
       "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
       common_tls_context:
         tls_certificates:
+        # 1. Server Certificate cho Domain (Let's Encrypt / DigiCert để iPhone tin cậy domain)
         - certificate_chain: { filename: "/etc/envoy/server.crt" }
           private_key: { filename: "/etc/envoy/server.key" }
         validation_context:
+        # 2. CA nội bộ để xác minh Client Certificate (device.crt của iPhone)
           trusted_ca:
-            filename: "/etc/envoy/ca.pem"  # SCEP Root CA để xác thực thiết bị
+            filename: "/etc/envoy/ca.pem"
+      # Đòi chứng chỉ từ Client
       require_client_certificate: true
   ```
-* **Lưu ý:** Kịch bản này **không thể** đi qua Cloudflare Quick Tunnel (vì Cloudflare chấm dứt TLS trước khi tới Envoy), mà đòi hỏi bạn phải có IP Public tĩnh và mở cổng trực tiếp cho Envoy.
+* **Giải đáp câu hỏi: Terminate ở Envoy có xung đột với Terminate của Domain không?**
+  * **Trường hợp KHÔNG XUNG ĐỘT (Direct IP / DNS Only):**
+    * Khi tên miền `mdm.yourdomain.com` trỏ thẳng về IP Public của máy chủ chạy Envoy (không qua proxy trung gian).
+    * Trong quá trình TLS handshake, Envoy làm cả 2 việc cùng lúc: xuất trình `server.crt` cho iPhone (để trình duyệt/hệ điều hành tin cậy Domain) và yêu cầu iPhone gửi `device.crt` lên để Envoy kiểm tra bằng `ca.pem`. Cả hai việc diễn ra êm đẹp trong 1 phiên TLS duy nhất.
+  * **Trường hợp XUNG ĐỘT TRIỆT TIÊU (Khi có Edge CDN / Cloudflare Tunnel ở trước):**
+    * Nếu bạn bật Cloudflare Proxy (đám mây cam) hoặc dùng Cloudflare Quick Tunnel (`trycloudflare.com`), Cloudflare sẽ đứng ra terminate TLS của domain ở Edge server.
+    * Do Cloudflare đã giải mã TLS, kết nối từ Cloudflare về Envoy chỉ là HTTP hoặc một TLS mới. iPhone không thể gửi `device.crt` ở tầng L4 tới Envoy được nữa. Envoy khi đó **bắt buộc phải tắt `require_client_certificate`**, nếu không toàn bộ request từ Cloudflare sẽ bị Envoy từ chối với lỗi SSL Handshake Failed!
+* **Vấn đề "Con gà & Quả trứng" (Chicken-and-Egg) trong Kịch bản B:**
+  * Để có `device.crt`, iPhone ban đầu phải mở Safari tải profile (`/`) và gửi CSR đến SCEP (`/scep`).
+  * Nếu Envoy bật cứng `require_client_certificate: true` cho toàn bộ cổng 443, thì iPhone mới (chưa enroll) sẽ bị **chặn ngay từ ngoài cửa**, không thể vào tải file cấu hình hay xin cert SCEP!
+  * **Cách giải quyết:** 
+    1. Tách làm 2 Domain / Port khác nhau: Domain portal/scep (`enroll.domain.com`) không đòi cert; còn domain giao tiếp MDM (`mdm.domain.com`) mới đòi cert.
+    2. Hoặc để `require_client_certificate: false` (optional) ở TLS, sau đó dùng Envoy HTTP filter kiểm tra cert theo từng route cụ thể.
+  * *=> Đây chính là lý do vì sao Apple thiết kế ra **Kịch bản A (`SignMessage: true`)** để loại bỏ hoàn toàn các rắc rối trên: vừa bảo mật cấp phần cứng (Secure Enclave), vừa tương thích hoàn toàn với mọi hạ tầng CDN/Gateway.*
+
+---
+
+### 6.4. Triển Khai Thực Tế: Phía Trước Có Cloudflare WAF
+
+Trong các hệ thống thực tế doanh nghiệp, việc không dùng Cloudflare Tunnel mà mở IP Public và đặt **Cloudflare WAF (Chế độ Proxied / Đám mây cam)** ở tầng biên là mô hình rất phổ biến.
+
+#### 1. Vì sao Kịch bản B bất khả thi khi dùng Cloudflare WAF?
+* Để thực hiện chức năng của một **L7 Web Application Firewall (WAF)** như lọc SQLi, XSS, chống tấn công bot, chống DDoS L7 và phân tích HTTP Body, Cloudflare **bắt buộc phải chấm dứt phiên TLS (TLS Termination)** ngay tại các máy chủ biên (Edge Server).
+* Kết quả là phiên kết nối mTLS giữa iPhone và máy chủ bị ngắt hoàn toàn tại Cloudflare Edge. 
+* Kết nối từ Cloudflare về Envoy là một phiên hoàn toàn mới do Cloudflare khởi tạo. Cloudflare không giữ Private Key trong Secure Enclave của iPhone nên **không thể xuất trình `device.crt` cho Envoy**.
+* Nếu cấu hình Envoy theo Kịch bản B (`require_client_certificate: true`), Envoy sẽ từ chối toàn bộ IP của Cloudflare với lỗi SSL Handshake Failed -> **Kịch bản B hoàn toàn không thể triển khai**.
+
+#### 2. Kịch bản A (`SignMessage: true`) + Cloudflare WAF: Sự Kết Hợp Tối Ưu
+Mô hình này phân tách trách nhiệm (Separation of Concerns) rất rõ ràng và chuẩn mực:
+
+```text
+[ Thiết bị Apple ]
+       │  (1) Gửi HTTPS kèm Header: Mdm-Signature (Ký bằng Secure Enclave)
+       ▼
+┌────────────────────────────────────────────────────────┐
+│  CLOUDFLARE WAF (Lớp Vỏ Bảo Vệ Biên - L7)              │
+│  - Chấm dứt TLS Domain (*.yourdomain.com)              │
+│  - Chặn bot, lọc DDoS L3/L4/L7, ẩn hoàn toàn IP gốc    │
+│  - Giữ nguyên HTTP Body và Header Mdm-Signature        │
+└──────────────────────────┬─────────────────────────────┘
+                           │  (2) Chuyển tiếp HTTPS/HTTP đã làm sạch
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│  ENVOY API GATEWAY (Điều Hướng & Kiểm Soát Tải)       │
+│  - /scep ──> SCEP Server (:8080)                       │
+│  - /mdm  ──> NanoMDM Server (:9000)                    │
+│  - /v1/* ──> Chặn tuyệt đối nếu không phải IP nội bộ   │
+└──────────────────────────┬─────────────────────────────┘
+                           │  (3) Giao việc xác thực thiết bị cho Core
+                           ▼
+┌────────────────────────────────────────────────────────┐
+│  NANOMDM SERVER (:9000)                                │
+│  - Đọc header Mdm-Signature, bóc tách cert             │
+│  - Dùng ca.pem xác minh chữ ký phần cứng               │
+└────────────────────────────────────────────────────────┘
+```
+
+#### 3. Các Quy Tắc Cấu Hình Bắt Buộc trên Cloudflare Dashboard
+Khi đưa domain MDM ra sau Cloudflare WAF (bật proxy đám mây cam), cần cấu hình các luật sau để tránh xung đột với giao thức Apple:
+
+1. **Bypass Cache (Tắt Cache tuyệt đối):**
+   * Các endpoint `/scep*` và `/mdm*` là giao thức trao đổi dữ liệu động theo thời gian thực (check-in, nhận lệnh, báo cáo kết quả).
+   * **Cấu hình:** Vào **Caching > Cache Rules**, tạo rule với điều kiện: `URI Path starts_with "/scep" OR URI Path starts_with "/mdm"` -> Chọn **Bypass Cache**.
+2. **WAF Exception / Skip Rules cho Plist và SCEP Binary:**
+   * Gói tin Apple MDM gửi về là định dạng XML Plist (chứa nhiều thẻ XML lồng nhau và chuỗi Base64 dài). Bộ luật WAF mặc định (như OWASP Managed Rules) có thể hiểu nhầm payload này là tấn công *XML External Entity (XXE)* hoặc *XSS* và chặn nhầm (False Positive).
+   * Request xin cert `/scep` sử dụng Content-Type `application/x-pki-message` (dữ liệu nhị phân PKCS#7).
+   * **Cấu hình:** Vào **Security > WAF > Custom Rules (hoặc WAF Exceptions)**, tạo rule bỏ qua kiểm tra WAF cho:
+     * `http.request.uri.path in {"/mdm" "/scep"}` -> Action: **Skip all remaining WAF rules**.
+3. **Chế độ SSL/TLS Encryption:**
+   * Giữa Cloudflare và Envoy nên chọn chế độ **Full** hoặc **Full (Strict)** trên Cloudflare SSL/TLS tab. Bạn có thể cài đặt **Cloudflare Origin CA Certificate** (miễn phí, thời hạn tới 15 năm) lên Envoy để mã hóa an toàn đường truyền từ Cloudflare Edge về máy chủ Envoy của bạn.
+4. **Bảo toàn Header tùy biến:**
+   * Đảm bảo không tạo bất kỳ luật Transform Rules nào làm xóa hoặc sửa đổi header `Mdm-Signature`.
 
 ---
 
