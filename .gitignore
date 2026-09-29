@@ -44,7 +44,8 @@ nanomdm-*/nano2nano-linux-amd64
 
 # SCEP binaries & cloned source repo
 scep/*-linux-amd64
-scep/
+scep/*
+!scep/Dockerfile
 
 # ==============================================================================
 # Logs, Python Cache & Editor files

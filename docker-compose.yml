@@ -23,7 +23,10 @@ services:
   # 1. SCEP Server: Máy chủ cấp phát chứng chỉ định danh thiết bị (CA)
   # ============================================================================
   scep:
-    image: micromdm/scep:latest
+    build:
+      context: ./scep
+      dockerfile: Dockerfile
+    image: scep:local
     container_name: scep-server
     restart: unless-stopped
     volumes:
