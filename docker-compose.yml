@@ -1,0 +1,69 @@
+services:
+  # ============================================================================
+  # 0. Envoy API Gateway: Cổng đón lưu lượng duy nhất cho toàn hệ thống
+  # ============================================================================
+  envoy:
+    image: envoyproxy/envoy:v1.28-latest
+    container_name: mdm-envoy
+    restart: unless-stopped
+    environment:
+      - ENVOY_UID=0
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./envoy/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - scep
+      - nanomdm
+      - portal
+
+  # ============================================================================
+  # 1. SCEP Server: Máy chủ cấp phát chứng chỉ định danh thiết bị (CA)
+  # ============================================================================
+  scep:
+    image: micromdm/scep:latest
+    container_name: scep-server
+    restart: unless-stopped
+    volumes:
+      - ./scep/depot:/depot
+    # Cờ -allowrenew 0: Luôn cho phép cấp phát mới, không chặn trùng lặp sổ cái
+    command: ["-allowrenew", "0"]
+
+  # ============================================================================
+  # 2. NanoMDM Server: Máy chủ điều khiển & nhận lệnh MDM từ Apple
+  # ============================================================================
+  nanomdm:
+    build:
+      context: ./nanomdm-server
+      dockerfile: Dockerfile
+    image: nanomdm:local
+    container_name: nanomdm-server
+    restart: unless-stopped
+    ports:
+      # Chỉ bind localhost để Admin trên server gọi lệnh cmdr.py
+      - "127.0.0.1:9000:9000"
+    volumes:
+      # Lưu trữ database cục bộ (chứng chỉ push, token APNs, thiết bị đã enroll)
+      - ./nanomdm-server/dbkv:/app/dbkv
+      # Chứng chỉ Root CA của SCEP để xác thực thiết bị kết nối mTLS
+      - ./ca.pem:/app/ca.pem:ro
+    command: ["/app/nanomdm", "-ca", "/app/ca.pem", "-api", "nanomdm", "-debug"]
+    depends_on:
+      - scep
+
+  # ============================================================================
+  # 3. Web Enrollment Portal: Cổng tải hồ sơ enroll.mobileconfig cho Safari
+  # ============================================================================
+  portal:
+    build:
+      context: ./nanomdm-server
+      dockerfile: Dockerfile
+    image: nanomdm:local
+    container_name: enroll-portal
+    restart: unless-stopped
+    volumes:
+      - ./nanomdm-server/enroll.mobileconfig:/app/enroll.mobileconfig:ro
+      - ./nanomdm-server/serve.py:/app/serve.py:ro
+    command: ["python3", "/app/serve.py"]

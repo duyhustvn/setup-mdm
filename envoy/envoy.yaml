@@ -7,30 +7,76 @@
 
 static_resources:
   listeners:
+  # ============================================================================
+  # 1. Listener Cổng 80: Tự động Redirect toàn bộ sang HTTPS (443)
+  # ============================================================================
   - name: listener_http
     address:
       socket_address:
         address: 0.0.0.0
-        port_value: 10000
+        port_value: 80
     filter_chains:
     - filters:
       - name: envoy.filters.network.http_connection_manager
         typed_config:
           "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-          stat_prefix: ingress_http
+          stat_prefix: redirect_http
+          codec_type: AUTO
+          route_config:
+            name: redirect_routes
+            virtual_hosts:
+            - name: redirect_vhost
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                redirect:
+                  https_redirect: true
+                  port_redirect: 443
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  # ============================================================================
+  # 2. Listener Cổng 443: Terminate SSL Let's Encrypt & Định tuyến MDM
+  # ============================================================================
+  - name: listener_https
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 443
+    filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            alpn_protocols: ["h2,http/1.1"]
+            tls_certificates:
+            - certificate_chain:
+                filename: "/etc/letsencrypt/live/testpir.xyz/fullchain.pem"
+              private_key:
+                filename: "/etc/letsencrypt/live/testpir.xyz/privkey.pem"
+      filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_https
           codec_type: AUTO
           route_config:
             name: mdm_routes
             virtual_hosts:
             - name: mdm_virtual_host
-              domains: ["*"]
+              domains: ["mdm.testpir.xyz", "testpir.xyz", "*"]
               routes:
-              # 1. NanoMDM Admin API (/v1/)
+              # 1. NanoMDM Admin API (/v1/) - Chặn từ bên ngoài Internet
               - match:
                   prefix: "/v1/"
-                route:
-                  cluster: nanomdm_cluster
-                  timeout: 30s
+                direct_response:
+                  status: 403
+                  body:
+                    inline_string: "Forbidden: Admin API is only accessible internally.\n"
 
               # 2. SCEP CA Endpoint (/scep)
               - match:
@@ -71,7 +117,7 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: 127.0.0.1
+                address: portal
                 port_value: 8000
 
   # Cluster 2: SCEP CA Server
@@ -86,7 +132,7 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: 127.0.0.1
+                address: scep
                 port_value: 8080
 
   # Cluster 3: NanoMDM Core Server
@@ -101,5 +147,5 @@ static_resources:
         - endpoint:
             address:
               socket_address:
-                address: 127.0.0.1
+                address: nanomdm
                 port_value: 9000

@@ -16,7 +16,7 @@
 				<key>Keysize</key>
 				<integer>2048</integer>
 				<key>URL</key>
-				<string>https://bbs-receptors-entrepreneurs-achievements.trycloudflare.com/scep</string>
+				<string>https://testpir.xyz/scep</string>
 			</dict>
 			<key>PayloadIdentifier</key>
 			<string>com.github.micromdm.scep</string>
@@ -49,7 +49,7 @@
 				<string>com.apple.mdm.token</string>
 			</array>
 			<key>ServerURL</key>
-			<string>https://necklace-systems-spine-workplace.trycloudflare.com/mdm</string>
+			<string>https://testpir.xyz/mdm</string>
 			<key>SignMessage</key>
 			<true/>
 			<key>Topic</key>
