@@ -60,10 +60,10 @@ services:
   # 3. Web Enrollment Portal: Cổng tải hồ sơ enroll.mobileconfig cho Safari
   # ============================================================================
   portal:
-    build:
-      context: ./nanomdm-server
-      dockerfile: Dockerfile
-    image: nanomdm:local
+    # build:
+    #   context: ./nanomdm-server
+    #   dockerfile: Dockerfile
+    image: duyle95/nanomdm:v0.9.0
     container_name: enroll-portal
     restart: unless-stopped
     volumes:
